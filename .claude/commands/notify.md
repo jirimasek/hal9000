@@ -4,8 +4,7 @@ Send a proactive message to Jiří via Telegram using `$HAL_HOME/scripts/notify.
 
 ```bash
 # Load environment (required in non-interactive shells)
-export $(cat $HAL_HOME/conf/config.env | xargs)
-export $(cat $HAL_HOME/conf/secrets.env | xargs)
+set -a && source $HAL_HOME/conf/config.env && source $HAL_HOME/conf/secrets.env && set +a
 
 # Send a text message
 $HAL_HOME/venv/bin/python3 $HAL_HOME/scripts/notify.py text "Your message here"

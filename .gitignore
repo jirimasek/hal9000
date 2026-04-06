@@ -1,0 +1,38 @@
+# Ignore everything by default (home directory repo)
+/*
+
+# Explicitly allow project files
+!.gitignore
+!README.md
+!.claude/
+!conf/
+!docs/
+!scripts/
+
+# Exclude sensitive/runtime files within .claude/
+.claude/.credentials.json
+.claude/backups/
+.claude/cache/
+.claude/file-history/
+.claude/projects/
+.claude/plugins/
+.claude/settings.json
+.claude/settings.local.json
+.claude/history.jsonl
+.claude/sessions/
+.claude/paste-cache/
+.claude/shell-snapshots/
+.claude/mcp-needs-auth-cache.json
+
+# Exclude applied config and secrets
+conf/secrets.env
+conf/config.env
+
+# Exclude runtime directories
+data/
+logs/
+workspace/
+venv/
+__pycache__/
+*.pyc
+*.pyo

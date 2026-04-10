@@ -10,7 +10,8 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import BadRequest
 from faster_whisper import WhisperModel
-from hal9000 import BASE_DIR, TELEGRAM_TOKEN, ALLOWED_USER_ID, make_workspace_dir, text_to_ogg, md_to_html
+from hal9000 import BASE_DIR, TELEGRAM_TOKEN, ALLOWED_USER_ID, make_workspace_dir, md_to_html
+from tts import text_to_ogg
 
 SESSION_FILE = BASE_DIR / "data" / "session.json"
 CLAUDE_TIMEOUT = 300  # seconds before giving up on a Claude call

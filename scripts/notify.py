@@ -11,7 +11,8 @@ import os
 import sys
 import asyncio
 from telegram import Bot
-from hal9000 import TELEGRAM_TOKEN, ALLOWED_USER_ID, text_to_ogg, md_to_html
+from hal9000 import TELEGRAM_TOKEN, ALLOWED_USER_ID, md_to_html
+from tts import text_to_ogg
 
 
 async def send(mode: str, content: str, caption: str | None = None):

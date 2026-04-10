@@ -94,7 +94,7 @@ def _tool_progress_message(tool_name: str, tool_input: dict) -> str | None:
 async def call_claude(user_input: str, session_id: str | None, on_progress=None) -> tuple[str, str]:
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
-        "--output-format", "streaming-json",
+        "--output-format", "stream-json", "--verbose",
     ]
     if session_id:
         cmd += ["--resume", session_id]

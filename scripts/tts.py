@@ -23,6 +23,7 @@ from hal9000 import BASE_DIR, make_workspace_dir, strip_markdown
 
 PIPER_MODEL_PATH = BASE_DIR / "data" / "tts" / "cs_CZ-jirka-medium.onnx"
 ELEVENLABS_VOICE_NAME = os.environ.get("ELEVENLABS_VOICE_NAME", "Flint")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "")
 ELEVENLABS_MODEL = "eleven_multilingual_v2"
 
 
@@ -58,17 +59,21 @@ class TTSService:
 
     def _get_elevenlabs_voice_id(self) -> str:
         if self._elevenlabs_voice_id is None:
-            client = self._get_elevenlabs_client()
-            voices = client.voices.get_all()
-            match = next(
-                (v for v in voices.voices if ELEVENLABS_VOICE_NAME.lower() in v.name.lower()),
-                None,
-            )
-            if match is None:
-                raise RuntimeError(
-                    f"Hlas '{ELEVENLABS_VOICE_NAME}' nebyl v ElevenLabs nalezen."
+            if ELEVENLABS_VOICE_ID:
+                self._elevenlabs_voice_id = ELEVENLABS_VOICE_ID
+            else:
+                # Fallback: look up by name (requires voices_read permission)
+                client = self._get_elevenlabs_client()
+                voices = client.voices.get_all()
+                match = next(
+                    (v for v in voices.voices if ELEVENLABS_VOICE_NAME.lower() in v.name.lower()),
+                    None,
                 )
-            self._elevenlabs_voice_id = match.voice_id
+                if match is None:
+                    raise RuntimeError(
+                        f"Hlas '{ELEVENLABS_VOICE_NAME}' nebyl v ElevenLabs nalezen."
+                    )
+                self._elevenlabs_voice_id = match.voice_id
         return self._elevenlabs_voice_id
 
     def _synthesize_elevenlabs(self, text: str) -> bytes:

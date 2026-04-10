@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from datetime import datetime
+from pathlib import Path
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import BadRequest
@@ -13,14 +14,7 @@ from hal9000 import BASE_DIR, TELEGRAM_TOKEN, ALLOWED_USER_ID, make_workspace_di
 
 SESSION_FILE = BASE_DIR / "data" / "session.json"
 CLAUDE_TIMEOUT = 300  # seconds before giving up on a Claude call
-PROGRESS_INTERVAL = 30  # seconds between progress notifications
-PROGRESS_MESSAGES = [
-    "Zpracovávám dotaz...",
-    "Stále pracuji, chvíli ještě...",
-    "Dost těžko se to vysvětluje, ale pracuji na tom...",
-    "Výpočet pokračuje...",
-    "Ještě okamžik, prosím...",
-]
+PROGRESS_INTERVAL = 60  # seconds between fallback progress notifications
 LOGS_DIR = BASE_DIR / "logs"
 CONFIRM_MARKER = "[CONFIRM]"
 SEND_IMAGE_RE = re.compile(r'\[SEND_IMAGE:([^\]]+)\]')
@@ -65,10 +59,42 @@ def log_entry(log_path: str, role: str, message: str):
         f.write(f"[{timestamp}] {role}:\n{message}\n\n")
 
 
-async def call_claude(user_input: str, session_id: str | None) -> tuple[str, str]:
+def _tool_progress_message(tool_name: str, tool_input: dict) -> str | None:
+    """Return a human-readable progress message for a Claude tool call, or None to stay silent."""
+    if tool_name == "Read":
+        name = Path(tool_input.get("file_path", "")).name
+        return f"Čtu {name}..." if name else "Čtu soubor..."
+    if tool_name == "Write":
+        name = Path(tool_input.get("file_path", "")).name
+        return f"Zapisuji {name}..." if name else "Zapisuji soubor..."
+    if tool_name == "Edit":
+        name = Path(tool_input.get("file_path", "")).name
+        return f"Upravuji {name}..." if name else "Upravuji soubor..."
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "").split("\n")[0][:60]
+        return f"Spouštím: {cmd}..." if cmd else "Spouštím příkaz..."
+    if tool_name == "Glob":
+        pattern = tool_input.get("pattern", "")
+        return f"Hledám soubory {pattern}..." if pattern else "Prohledávám soubory..."
+    if tool_name == "Grep":
+        pattern = tool_input.get("pattern", "")
+        return f"Prohledávám kód ({pattern})..." if pattern else "Prohledávám kód..."
+    if tool_name == "WebSearch":
+        query = tool_input.get("query", "")[:50]
+        return f"Hledám na webu: {query}..." if query else "Hledám na webu..."
+    if tool_name == "WebFetch":
+        return "Načítám stránku..."
+    if tool_name == "Agent":
+        return "Spouštím podúkol..."
+    if tool_name == "TodoWrite":
+        return "Aktualizuji plán..."
+    return None
+
+
+async def call_claude(user_input: str, session_id: str | None, on_progress=None) -> tuple[str, str]:
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
-        "--output-format", "json",
+        "--output-format", "streaming-json",
     ]
     if session_id:
         cmd += ["--resume", session_id]
@@ -80,30 +106,54 @@ async def call_claude(user_input: str, session_id: str | None) -> tuple[str, str
         stderr=asyncio.subprocess.PIPE,
         cwd="/home/hal9000",
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
+
+    result_text = ""
+    new_session_id = session_id or ""
 
     try:
-        data = json.loads(stdout.decode().strip())
-        response = data.get("result", "").strip()
-        new_session_id = data.get("session_id", session_id or "")
-        if data.get("is_error"):
-            response = f"Chyba: {response}"
-    except json.JSONDecodeError:
-        response = stdout.decode().strip() or stderr.decode().strip() or "Žádná odpověď."
-        new_session_id = session_id or ""
+        async with asyncio.timeout(CLAUDE_TIMEOUT):
+            async for raw_line in proc.stdout:
+                line = raw_line.decode().strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-    return response, new_session_id
+                event_type = event.get("type")
+
+                if event_type == "assistant" and on_progress:
+                    for block in event.get("message", {}).get("content", []):
+                        if block.get("type") == "tool_use":
+                            msg = _tool_progress_message(block.get("name", ""), block.get("input", {}))
+                            if msg:
+                                try:
+                                    await on_progress(msg)
+                                except Exception as e:
+                                    logging.warning(f"Progress callback failed: {e}")
+
+                elif event_type == "result":
+                    new_session_id = event.get("session_id", new_session_id)
+                    if event.get("is_error"):
+                        result_text = f"Chyba: {event.get('result', '')}"
+                    else:
+                        result_text = event.get("result", "").strip()
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+
+    return result_text or "Žádná odpověď.", new_session_id
 
 
 async def _progress_notifier(reply_fn) -> None:
-    """Send periodic progress messages while Claude is thinking."""
-    for i, msg in enumerate(PROGRESS_MESSAGES):
-        await asyncio.sleep(PROGRESS_INTERVAL)
-        try:
-            await reply_fn(msg)
-        except Exception as e:
-            logging.warning(f"Progress notification failed: {e}")
-    # After all messages exhausted, keep quiet
+    """Fallback: send a progress message every PROGRESS_INTERVAL seconds if Claude is still running."""
+    await asyncio.sleep(PROGRESS_INTERVAL)
+    try:
+        await reply_fn("Stále pracuji, chvíli ještě...")
+    except Exception as e:
+        logging.warning(f"Progress notification failed: {e}")
     await asyncio.sleep(3600)
 
 
@@ -145,7 +195,7 @@ async def call_and_reply(reply_fn, user_input: str, voice_fn=None) -> None:
     progress_task = asyncio.create_task(_progress_notifier(reply_fn))
     try:
         claude_input = f"[TELEGRAM]\n{user_input}"
-        response, new_session_id = await call_claude(claude_input, current_session_id)
+        response, new_session_id = await call_claude(claude_input, current_session_id, on_progress=reply_fn)
 
         if new_session_id:
             if not log_path:

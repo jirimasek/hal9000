@@ -1,4 +1,4 @@
-import subprocess
+import asyncio
 import logging
 import json
 import os
@@ -12,6 +12,15 @@ from faster_whisper import WhisperModel
 from hal9000 import BASE_DIR, TELEGRAM_TOKEN, ALLOWED_USER_ID, make_workspace_dir, text_to_ogg, md_to_html
 
 SESSION_FILE = BASE_DIR / "data" / "session.json"
+CLAUDE_TIMEOUT = 300  # seconds before giving up on a Claude call
+PROGRESS_INTERVAL = 30  # seconds between progress notifications
+PROGRESS_MESSAGES = [
+    "Zpracovávám dotaz...",
+    "Stále pracuji, chvíli ještě...",
+    "Dost těžko se to vysvětluje, ale pracuji na tom...",
+    "Výpočet pokračuje...",
+    "Ještě okamžik, prosím...",
+]
 LOGS_DIR = BASE_DIR / "logs"
 CONFIRM_MARKER = "[CONFIRM]"
 SEND_IMAGE_RE = re.compile(r'\[SEND_IMAGE:([^\]]+)\]')
@@ -56,7 +65,7 @@ def log_entry(log_path: str, role: str, message: str):
         f.write(f"[{timestamp}] {role}:\n{message}\n\n")
 
 
-def call_claude(user_input: str, session_id: str | None) -> tuple[str, str]:
+async def call_claude(user_input: str, session_id: str | None) -> tuple[str, str]:
     cmd = [
         "claude", "--print", "--dangerously-skip-permissions",
         "--output-format", "json",
@@ -65,21 +74,37 @@ def call_claude(user_input: str, session_id: str | None) -> tuple[str, str]:
         cmd += ["--resume", session_id]
     cmd.append(user_input)
 
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=120, cwd="/home/hal9000"
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd="/home/hal9000",
     )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
 
     try:
-        data = json.loads(result.stdout.strip())
+        data = json.loads(stdout.decode().strip())
         response = data.get("result", "").strip()
         new_session_id = data.get("session_id", session_id or "")
         if data.get("is_error"):
             response = f"Chyba: {response}"
     except json.JSONDecodeError:
-        response = result.stdout.strip() or result.stderr.strip() or "Žádná odpověď."
+        response = stdout.decode().strip() or stderr.decode().strip() or "Žádná odpověď."
         new_session_id = session_id or ""
 
     return response, new_session_id
+
+
+async def _progress_notifier(reply_fn) -> None:
+    """Send periodic progress messages while Claude is thinking."""
+    for i, msg in enumerate(PROGRESS_MESSAGES):
+        await asyncio.sleep(PROGRESS_INTERVAL)
+        try:
+            await reply_fn(msg)
+        except Exception as e:
+            logging.warning(f"Progress notification failed: {e}")
+    # After all messages exhausted, keep quiet
+    await asyncio.sleep(3600)
 
 
 async def on_startup(application) -> None:
@@ -117,9 +142,10 @@ async def call_and_reply(reply_fn, user_input: str, voice_fn=None) -> None:
     log_path = session["log_path"] if session else None
     response = "Žádná odpověď."
 
+    progress_task = asyncio.create_task(_progress_notifier(reply_fn))
     try:
         claude_input = f"[TELEGRAM]\n{user_input}"
-        response, new_session_id = call_claude(claude_input, current_session_id)
+        response, new_session_id = await call_claude(claude_input, current_session_id)
 
         if new_session_id:
             if not log_path:
@@ -128,8 +154,8 @@ async def call_and_reply(reply_fn, user_input: str, voice_fn=None) -> None:
             log_entry(log_path, "JIŘÍ", user_input)
             log_entry(log_path, "HAL", response)
 
-    except subprocess.TimeoutExpired:
-        response = "Časový limit vypršel."
+    except asyncio.TimeoutError:
+        response = "Omlouvám se – výpočet překročil časový limit. Zkus to prosím znovu."
         if not log_path:
             log_path = make_log_path(f"error-{datetime.now().strftime('%H%M%S')}")
         log_entry(log_path, "JIŘÍ", user_input)
@@ -140,6 +166,8 @@ async def call_and_reply(reply_fn, user_input: str, voice_fn=None) -> None:
             log_path = make_log_path(f"error-{datetime.now().strftime('%H%M%S')}")
         log_entry(log_path, "JIŘÍ", user_input)
         log_entry(log_path, "HAL", response)
+    finally:
+        progress_task.cancel()
 
     # Extract image paths before any further processing
     image_paths = SEND_IMAGE_RE.findall(response)
